@@ -13,12 +13,14 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean,
-    DateTime, ForeignKey, Index
+    DateTime, ForeignKey
 )
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 import stripe
+
+app = FastAPI()  # Critical: App instance was missing
 
 # -----------------------------------------------------------------------------
 # Config
@@ -65,6 +67,13 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         return payload.get("sub")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # -----------------------------------------------------------------------------
 # Models
@@ -149,11 +158,14 @@ async def notify_cleaners(cleaners: List[Cleaner], job_id: int):
     logger.info(f"Notify {len(cleaners)} cleaners about job {job_id}")
 
 # -----------------------------------------------------------------------------
-# FastAPI app
+# Middlewares and routes
 # -----------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.middleware("http")
@@ -164,13 +176,15 @@ async def log_requests(request, call_next):
     return response
 
 @app.get("/health")
-def health(): return {"status": "ok", "time": datetime.utcnow().isoformat()}
+def health():
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 @app.get("/support")
-def support(): return {"ko_fi": "https://ko-fi.com/bryantolbert"}
+def support():
+    return {"ko_fi": "https://ko-fi.com/bryantolbert"}
 
 @app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(lambda: SessionLocal())):
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Cleaner).filter(Cleaner.name == form_data.username).first()
     if not user or not verify_password(form_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -178,25 +192,36 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/cleaners/register")
-def register_cleaner(data: CleanerCreate, db: Session = Depends(lambda: SessionLocal())):
+def register_cleaner(data: CleanerCreate, db: Session = Depends(get_db)):
     db_cleaner = Cleaner(
         name=data.name, lat=data.lat, lon=data.lon,
         stripe_account_id=data.stripe_account_id, fcm_token=data.fcm_token,
         password_hash=hash_password(data.password)
     )
-    db.add(db_cleaner); db.commit(); db.refresh(db_cleaner)
+    db.add(db_cleaner)
+    db.commit()
+    db.refresh(db_cleaner)
     return {"cleaner_id": db_cleaner.id}
 
 @app.post("/jobs/create", response_model=JobResponse)
-async def create_job(background_tasks: BackgroundTasks, job_data: JobCreate,
-                     photos: List[UploadFile] = File(default=[]),
-                     db: Session = Depends(lambda: SessionLocal()),
-                     current_user: str = Depends(get_current_user)):
+async def create_job(
+    background_tasks: BackgroundTasks,
+    job_data: JobCreate,
+    photos: List[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user)
+):
     ai_result = analyze_images(photos)
-    new_job = Job(host_id=current_user, description=job_data.description,
-                  lat=job_data.lat, lon=job_data.lon,
-                  estimated_price=ai_result["estimated_price"])
-    db.add(new_job); db.commit(); db.refresh(new_job)
+    new_job = Job(
+        host_id=current_user,
+        description=job_data.description,
+        lat=job_data.lat,
+        lon=job_data.lon,
+        estimated_price=ai_result["estimated_price"]
+    )
+    db.add(new_job)
+    db.commit()
+    db.refresh(new_job)
     nearby = get_nearby_cleaners(db, job_data.lat, job_data.lon)
     assigned_id = None
     if nearby:
@@ -206,8 +231,11 @@ async def create_job(background_tasks: BackgroundTasks, job_data: JobCreate,
         db.commit()
         background_tasks.add_task(notify_cleaners, nearby[:3], new_job.id)
         assigned_id = top.id
-    return JobResponse(job_id=new_job.id, estimated_price=new_job.estimated_price,
-                       status=new_job.status, assigned_to=assigned_id,
-                       issues=ai_result["issues"], created_at=new_job.created_at)
-
-@app.post
+    return JobResponse(
+        job_id=new_job.id,
+        estimated_price=new_job.estimated_price,
+        status=new_job.status,
+        assigned_to=assigned_id,
+        issues=ai_result["issues"],
+        created_at=new_job.created_at
+)
