@@ -1,2 +1,17 @@
-# TurnAI-Clean-
-Premier Novel Monetizable App Concept: AI-Assisted Short-Term Rental Turnover Cleaning Marketplace Utilizing rigorously verified real-time data as of December 23, 2025, from multiple independent sources (e.g., Market Research Future, Agency Handy, Orbiting Web), short-term rental (STR) turnover cleaning stands as the most sought-after and underse .
+# TurnAI Clean Backend
+
+Production-ready FastAPI backend for an AI-enhanced marketplace for short-term rental turnover cleaning.
+
+## Features
+- JWT auth (hosts and cleaners)
+- Cleaner registration and job creation with validation
+- Stripe PaymentIntent endpoint
+- Nearby cleaner ranking via Haversine
+- Structured logging middleware
+- Health and support endpoints (Ko-fi link)
+- OpenAPI examples for Key endpoints
+- Dockerfile and Compose with Postgres
+- Ready for notifications (FCM/Twilio stubs)
+
+## Quickstart (Dev)
+1. Create a virtualenv and install:
