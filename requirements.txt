@@ -1,9 +1,10 @@
+
 fastapi
-uvicorn
-sqlalchemy
+uvicorn[standard]
+sqlalchemy==2.0.45
 pydantic
 python-multipart
-google-cloud-vision
-stripe
-pyfcm
-ngeohash
+passlib[bcrypt]
+python-jose[cryptography]
+stripe==14.1.0
+psycopg2-binary  # Optional for PostgreSQL support; retained as present originally
