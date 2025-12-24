@@ -6,6 +6,5 @@ python-multipart
 google-cloud-vision
 stripe
 pyfcm
-pygeohash  # Assuming prior geohash fix
-python-jose[cryptography]  # From previous fix
-passlib[bcrypt]  # Critical addition
+python-jose[cryptography]
+passlib[bcrypt]
