@@ -6,4 +6,5 @@ python-multipart
 google-cloud-vision
 stripe
 pyfcm
-pygeohash  # Fixed: was ngeohash (non-existent package)
+pygeohash  # Or your chosen geohash library
+python-jose[cryptography]  # Critical addition
