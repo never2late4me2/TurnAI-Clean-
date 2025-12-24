@@ -1,3 +1,4 @@
+
 import os
 import math
 import logging
@@ -13,9 +14,10 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean,
-    DateTime, ForeignKey, Index, text
+    DateTime, ForeignKey, Index, event
 )
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
+from sqlalchemy.engine import Engine
 from pydantic import BaseModel, Field, field_validator
 
 import stripe
@@ -54,30 +56,30 @@ logging.basicConfig(
 logger = logging.getLogger("turnai")
 
 # -----------------------------------------------------------------------------
-# Idempotent Database Schema Initialization (Critical Fix)
+# Robust Schema Initialization (eliminates "no such table" warnings)
 # -----------------------------------------------------------------------------
 try:
-    # Create tables safely (idempotent by default)
     Base.metadata.create_all(bind=engine)
     logger.info("Tables created or verified successfully.")
-
-    # Create all indexes idempotently using SQLite's "IF NOT EXISTS"
-    with engine.connect() as conn:
-        # From Cleaner model
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cleaners_location ON cleaners (lat, lon)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cleaners_available ON cleaners (available)"))
-
-        # From Job model
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_location ON jobs (lat, lon)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs (status)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_created ON jobs (created_at)"))
-
-        conn.commit()
-    logger.info("Indexes created or verified successfully (idempotent).")
-
 except Exception as e:
-    logger.warning(f"Schema initialization warning (likely duplicate): {e}")
-    # App continues – safe for restarts/redeploys
+    logger.error(f"Critical error creating tables: {e}")
+    raise
+
+@event.listens_for(Engine, "connect")
+def create_indexes_on_connect(dbapi_connection, connection_record):
+    try:
+        cursor = dbapi_connection.cursor()
+        # Cleaner indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_cleaners_location ON cleaners (lat, lon)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_cleaners_available ON cleaners (available)")
+        # Job indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_jobs_location ON jobs (lat, lon)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs (status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_jobs_created ON jobs (created_at)")
+        cursor.close()
+        logger.info("Indexes created or verified successfully.")
+    except Exception as idx_e:
+        logger.warning(f"Index creation issue (safe on fresh DB): {idx_e}")
 
 # -----------------------------------------------------------------------------
 # Auth setup
@@ -109,7 +111,7 @@ def get_current_identity(token: str = Depends(oauth2_scheme)) -> Dict[str, str]:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # -----------------------------------------------------------------------------
-# SQLAlchemy models (corrected syntax)
+# SQLAlchemy models
 # -----------------------------------------------------------------------------
 class Cleaner(Base):
     __tablename__ = "cleaners"
@@ -143,34 +145,283 @@ class Job(Base):
 
     assigned_cleaner = relationship("Cleaner", back_populates="assigned_jobs")
 
+# -----------------------------------------------------------------------------
+# Pydantic schemas
+# -----------------------------------------------------------------------------
+class CleanerCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    lat: float
+    lon: float
+    password: str = Field(..., min_length=8)
+    stripe_account_id: Optional[str] = None
+    fcm_token: Optional[str] = None
+
+    @field_validator("lat")
+    @classmethod
+    def validate_latitude(cls, v: float) -> float:
+        if not (-90 <= v <= 90):
+            raise ValueError("Latitude must be between -90 and 90 degrees")
+        return v
+
+    @field_validator("lon")
+    @classmethod
+    def validate_longitude(cls, v: float) -> float:
+        if not (-180 <= v <= 180):
+            raise ValueError("Longitude must be between -180 and 180 degrees")
+        return v
+
+
+class JobCreate(BaseModel):
+    description: str = Field(..., min_length=10, max_length=500)
+    lat: float
+    lon: float
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Description cannot be empty")
+        return stripped
+
+    @field_validator("lat")
+    @classmethod
+    def validate_lat(cls, v: float) -> float:
+        if not (-90 <= v <= 90):
+            raise ValueError("Latitude must be between -90 and 90")
+        return v
+
+    @field_validator("lon")
+    @classmethod
+    def validate_lon(cls, v: float) -> float:
+        if not (-180 <= v <= 180):
+            raise ValueError("Longitude must be between -180 and 180")
+        return v
+
+
+class JobResponse(BaseModel):
+    job_id: int
+    estimated_price: float
+    status: str
+    assigned_to: Optional[int] = None
+    issues: List[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 # -----------------------------------------------------------------------------
-# Remaining code (schemas, utilities, endpoints) – unchanged except minor fixes
+# Utility functions
 # -----------------------------------------------------------------------------
-# (Pydantic schemas, haversine_distance with ** 2 fixed, analyze_images, get_nearby_cleaners,
-# notify_cleaners, FastAPI app setup, endpoints remain as in your cleaned version,
-# with variable name corrections applied.)
-
-# ... [Insert the rest of your code here – schemas, utilities, app definition, endpoints]
-
-# Example of fixed Haversine (replace in your file):
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0  # km
+    """Great-circle distance in kilometers using Haversine formula."""
+    R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-# The rest of your endpoints (login, register_cleaner, create_job, create_payment_intent, etc.)
-# should be copied as-is after applying minor variable fixes shown earlier.
+
+def analyze_images(files: List[UploadFile]) -> Dict[str, object]:
+    """Simulated AI vision analysis – replace with real API in production."""
+    base_price = 250.0
+    issues = ["simulated clutter in living room", "minor bathroom staining"]
+    cleanliness_score = 82
+    adjustment = (100 - cleanliness_score) * 3.5
+    estimated_price = max(150.0, min(600.0, base_price + adjustment))
+    return {
+        "estimated_price": round(estimated_price, 2),
+        "cleanliness_score": cleanliness_score,
+        "issues": issues,
+    }
+
+
+def get_nearby_cleaners(
+    db: Session,
+    lat: float,
+    lon: float,
+    max_distance_km: float = 25.0,
+    limit: int = 5,
+) -> List[Cleaner]:
+    cleaners = db.query(Cleaner).filter(Cleaner.available.is_(True)).all()
+    nearby = []
+    for cleaner in cleaners:
+        dist = haversine_distance(lat, lon, cleaner.lat, cleaner.lon)
+        if dist <= max_distance_km:
+            nearby.append((cleaner, dist))
+    nearby_sorted = sorted(nearby, key=lambda x: (x[1], -x[0].rating, x[0].id))
+    return [cleaner for cleaner, _ in nearby_sorted][:limit]
+
+
+async def notify_cleaners(cleaners: List[Cleaner], job_id: int, message: Optional[str] = None):
+    default_message = f"New turnover job #{job_id} available in your area!"
+    msg = message or default_message
+    logger.info(f"[NOTIFICATION] Sending to {len(cleaners)} cleaners: {msg}")
+    # TODO: Integrate FCM or Twilio
+
 
 # -----------------------------------------------------------------------------
-# Entry point note
+# FastAPI app
+# -----------------------------------------------------------------------------
+app = FastAPI(title=APP_TITLE, description=APP_DESC, version=APP_VERSION)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    logger.info(f"Incoming {request.method} {request.url}")
+    response = await call_next(request)
+    logger.info(f"Completed {response.status_code}")
+    return response
+
+
+# -----------------------------------------------------------------------------
+# Health & support
+# -----------------------------------------------------------------------------
+@app.get("/health")
+def health():
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+
+@app.get("/support")
+def support():
+    return {"ko_fi": "https://ko-fi.com/bryantolbert"}
+
+
+# -----------------------------------------------------------------------------
+# Auth endpoint
+# -----------------------------------------------------------------------------
+@app.post("/token", response_model=TokenResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(lambda: SessionLocal())):
+    user = db.query(Cleaner).filter(Cleaner.name == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    role = "cleaner"
+    if "host" in (form_data.scopes or []):
+        role = "host"
+
+    token = create_access_token({"sub": user.name, "role": role})
+    return TokenResponse(access_token=token)
+
+
+# -----------------------------------------------------------------------------
+# Cleaner registration
+# -----------------------------------------------------------------------------
+@app.post("/cleaners/register")
+def register_cleaner(
+    cleaner_data: CleanerCreate,
+    db: Session = Depends(lambda: SessionLocal()),
+):
+    if cleaner_data.stripe_account_id:
+        existing = db.query(Cleaner).filter(Cleaner.stripe_account_id == cleaner_data.stripe_account_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Stripe account already registered")
+
+    if db.query(Cleaner).filter(Cleaner.name == cleaner_data.name).first():
+        raise HTTPException(status_code=400, detail="Cleaner name already registered")
+
+    db_cleaner = Cleaner(
+        name=cleaner_data.name,
+        lat=cleaner_data.lat,
+        lon=cleaner_data.lon,
+        stripe_account_id=cleaner_data.stripe_account_id,
+        fcm_token=cleaner_data.fcm_token,
+        password_hash=hash_password(cleaner_data.password),
+    )
+    db.add(db_cleaner)
+    db.commit()
+    db.refresh(db_cleaner)
+    return {"cleaner_id": db_cleaner.id}
+
+
+# -----------------------------------------------------------------------------
+# Job creation (host-only)
+# -----------------------------------------------------------------------------
+@app.post("/jobs/create", response_model=JobResponse)
+async def create_job(
+    background_tasks: BackgroundTasks,
+    job_data: JobCreate,
+    photos: List[UploadFile] = File(default=[]),
+    db: Session = Depends(lambda: SessionLocal()),
+    identity: Dict[str, str] = Depends(get_current_identity),
+):
+    if identity["role"] != "host":
+        raise HTTPException(status_code=403, detail="Only hosts can create jobs")
+
+    ai_result = analyze_images(photos)
+
+    new_job = Job(
+        host_id=identity["sub"],
+        description=job_data.description,
+        lat=job_data.lat,
+        lon=job_data.lon,
+        estimated_price=ai_result["estimated_price"],
+        status="pending",
+    )
+    db.add(new_job)
+    db.commit()
+    db.refresh(new_job)
+
+    nearby = get_nearby_cleaners(db, job_data.lat, job_data.lon)
+    assigned_id = None
+    if nearby:
+        top_cleaner = nearby[0]
+        new_job.assigned_cleaner_id = top_cleaner.id
+        new_job.status = "assigned"
+        db.commit()
+        background_tasks.add_task(notify_cleaners, nearby[:3], new_job.id)
+        assigned_id = top_cleaner.id
+
+    return JobResponse(
+        job_id=new_job.id,
+        estimated_price=ai_result["estimated_price"],
+        status=new_job.status,
+        assigned_to=assigned_id,
+        issues=ai_result["issues"],
+        created_at=new_job.created_at,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Stripe PaymentIntent
+# -----------------------------------------------------------------------------
+@app.post("/jobs/{job_id}/payment_intent")
+def create_payment_intent(
+    job_id: int,
+    db: Session = Depends(lambda: SessionLocal()),
+    identity: Dict[str, str] = Depends(get_current_identity),
+):
+    if identity["role"] != "host":
+        raise HTTPException(status_code=403, detail="Only hosts can initiate payments")
+
+    job = db.query(Job).get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not stripe.api_key:
+        raise HTTPException(status_code=400, detail="Stripe not configured")
+
+    amount_cents = max(0, int(job.estimated_price * 100))
+    intent = stripe.PaymentIntent.create(
+        amount=amount_cents,
+        currency="usd",
+        description=f"TurnAI Clean job #{job.id}",
+        metadata={"job_id": str(job.id), "host_id": job.host_id},
+    )
+    job.payment_intent_id = intent.id
+    db.commit()
+
+    return {"payment_intent_id": intent.id, "client_secret": intent.client_secret}
+
 # -----------------------------------------------------------------------------
 # Run with: uvicorn app:app --reload
+# -----------------------------------------------------------------------------
